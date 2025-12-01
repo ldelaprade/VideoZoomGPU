@@ -16,7 +16,12 @@
 		<AssemblyTitle>VLC Zoom Demo</AssemblyTitle>
 		<ApplicationIcon>favicon.ico</ApplicationIcon>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-		<WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>		
+		<WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+		<!-- Limit generated satellite resource assemblies to en-US -->
+		<SatelliteResourceLanguages>en-US</SatelliteResourceLanguages>
+		<!-- Optional: set UI culture to en-US for generated resources -->
+		<UICulture>en-US</UICulture>
+
 	</PropertyGroup>
 
 		
