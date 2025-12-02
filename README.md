@@ -62,3 +62,38 @@ Best compatibility/future-proofing for Windows 10/11 and new graphics hardware.
 - D3D11 is recommended for new projects and active maintenance because of better performance, advanced features, and robust modern support.
 - D3D9 should only be used for legacy projects or when forced by platform limitations (e.g., classic WPF's D3DImage).
 If you have legacy requirements or need WPF D3DImage, D3D9 is required; otherwise, D3D11 is the better choice.
+
+
+
+#### Remarks from Jesse Trana
+
+The underlying issue is that VLC 3.x simply don't expose the primitives that are needed, so no matter how hard one tries CPU copying will still be performed. Here's what's happening (as best as I understand it):
+ 
+0) VlcRender.VideoFormat is called and allocates some CPU buffers for later.
+ 
+1) In VlcRenderer.Lock, you pass in pointers to YUV color plane buffers. "Lock" in graphics terminology here means you are setting these up for direct access and no other code should touch it while locked.
+ 
+2) After it is locked, VLC is copying the video data which currently lives on the GPU in a special memory block into the normal YUV buffers that live in CPU memory.
+ 
+3) VlcRenderer.Unlock is called.
+ 
+4) If format conversion is needed, in VlcRenderer.Unlock it calls YuvConverter.I420ToBGRA_Planar, which in turn loops through the YUV color planes in CPU memory and does a copy/transform into a red/green/blue (BGRA = Blue Green Red Alpha) buffer on the CPU.
+ 
+5) Either way, this BGRA CPU buffer is copied back into GPU memory (most likely) by D3DRenderer.UpdateTexture.
+ 
+ 
+So concretely at least one GPU to CPU and back to CPU copy is occurring; if format conversion is needed there is effectively an extra CPU copy that is occurring. This isn't an issue with how well the code has been written or not - the callback only exposes the data via normal CPU memory so by using the callback at all it takes the performance hit.
+ 
+ 
+For this reason, the API itself was considered to be insufficient and for VLC 4.x they are making it more powerful. VLC 4.x introduces a new call lib_video_set_output_callbacks() (https://videolan.videolan.me/vlc/group__libvlc__media__player.html#gacbaba8adf41d20c935216d775926b808, see also https://code.videolan.org/videolan/LibVLCSharp/-/issues/607 when I contacted one of the developers) that allows for a full GPU-based approach. You can see the example they had here: https://code.videolan.org/videolan/LibVLCSharp/-/blob/master/samples/LibVLCSharp.CustomRendering.Direct3D11/Program.cs I'd played around with this a bit; I had problems with TerraFX so I was messing around with things a bit over here: https://bitbucket.org/appareo-aviation/saiir/branches/compare/Direct3D-Render-Spike%0Ddevelop#diff
+In short, this new approach becomes aware of the graphics engine - in our case Direct3D. Modern graphics engines basically all have a similar concept of "swap chains" (https://en.wikipedia.org/wiki/Swap_chain) as the way to implement the common idea of "double buffering". So the new method looks more like this:
+1) Set up the video output callbacks with a pointer to the swap chain that lives primarily in the GPU
+2) When rendering occurs, share/copy the raw video data with the swapchain while staying on the GPU
+3) Switch the double buffer current buffer pointer so the new data is displayed
+We had looked into this when we were adding gamma filtering. I would like to be able to change this part of our application someday because then we can add arbitrary low cost shaders for implementing better image filtering, which would be a good feature.
+ 
+But right now, there are a few problems:
+1) VLC 4.x is nowhere near stable. It's been being developed for years but there is not a clear timeline to the first stable release (or at least not the last time I checked, which has been a while)
+2) This solution is considerably more complex, and additionally depends on more interop code. While the existing code with DWM APIs is a bit tricky, the final solution for D3D looks more like a video game and becomes an area of code that noone without a significant amount of expertise will touch. Additionally, the interop libraries for D3D have not always been as strongly maintained, so there is an extra element of risk. Additionally, D3D 9 vs. 11 was something that needed to be thought of at the time; perhaps D3D 11 is sufficient now.
+ 
+So unfortunately a lot of it just comes down to initial development, ongoing maintenance cost, and VLC 4.x readiness at this time. Right now we do not have any permanent AIRS team member that is able to devote 100% of their time to the desktop tools side. If we did and VLC 4.x were ready, I think it would be a good time to revisit because we could do a lot of neat things with arbitrary shaders. (Note! To use gamma filtering requires software rendering right now!) But in the past, I've already gotten plenty questions about "how hard can it be to play video?" so it becomes less defensible to implement something even more complex at this time.
