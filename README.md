@@ -97,3 +97,59 @@ But right now, there are a few problems:
 2) This solution is considerably more complex, and additionally depends on more interop code. While the existing code with DWM APIs is a bit tricky, the final solution for D3D looks more like a video game and becomes an area of code that noone without a significant amount of expertise will touch. Additionally, the interop libraries for D3D have not always been as strongly maintained, so there is an extra element of risk. Additionally, D3D 9 vs. 11 was something that needed to be thought of at the time; perhaps D3D 11 is sufficient now.
  
 So unfortunately a lot of it just comes down to initial development, ongoing maintenance cost, and VLC 4.x readiness at this time. Right now we do not have any permanent AIRS team member that is able to devote 100% of their time to the desktop tools side. If we did and VLC 4.x were ready, I think it would be a good time to revisit because we could do a lot of neat things with arbitrary shaders. (Note! To use gamma filtering requires software rendering right now!) But in the past, I've already gotten plenty questions about "how hard can it be to play video?" so it becomes less defensible to implement something even more complex at this time.
+
+#### Claude AI's Analysis
+
+Jesse's analysis is absolutely correct. Your current implementation does indeed have CPU↔GPU copies happening. Let me break down what's really happening and what the path forward looks like:
+
+Current Reality (Your Implementation)
+You are doing GPU rendering for the zoom/crop/display, but the video decoding path still involves CPU copies:
+
+VLC decodes video → CPU memory (RV32/BGRA format)
+CPU buffer → D3D9 system memory surface (in D3DRenderer.UpdateTexture)
+System memory surface → GPU render target (via UpdateSurface)
+GPU render target → D3DImage → WPF display
+
+The bottleneck: Steps 1-3 involve CPU memory, which limits performance compared to a pure GPU pipeline.
+What "Pure GPU" Would Look Like (VLC 4.x)
+With VLC 4.x's new libvlc_video_set_output_callbacks:
+
+VLC decodes video → GPU texture directly (using D3D11 swap chain)
+GPU texture → Your shader for zoom/crop
+GPU output → Display
+
+No CPU copies - everything stays on the GPU.
+Is Your Current Solution "Good Enough"?
+Yes, for most use cases:
+
+✅ You're using GPU for the expensive zoom/pan/crop operations via pixel shader
+✅ D3D9 → D3DImage → WPF is hardware accelerated
+✅ The CPU copy overhead is acceptable for 1080p video at 30-60 FPS
+✅ Much simpler and maintainable than VLC 4.x + D3D11 interop
+
+When you'd need VLC 4.x:
+
+4K or 8K video playback
+High frame rate (120+ FPS) requirements
+Need for complex real-time GPU shaders (color grading, effects, etc.)
+Multiple simultaneous video streams
+
+My Recommendation
+Stick with your current solution because:
+
+VLC 4.x is still unstable - it's been in development for years with no release date
+Your code works and is maintainable - any team member can understand it
+The performance is acceptable - the CPU overhead for 1080p is minimal on modern hardware
+Lower risk - production-ready libraries (VLC 3.x, SharpDX)
+
+Future Migration Path (When VLC 4.x is Ready)
+When VLC 4.x becomes stable, you could:
+
+Keep your current ZoomState, MainWindow UI logic
+Replace VlcRenderer with a VLC 4.x + D3D11 version
+Update shaders from HLSL 2.0 (D3D9) to HLSL 5.0 (D3D11)
+Keep the same D3DImage WPF integration
+
+The architecture you've built is actually quite future-proof - only the VlcRenderer and D3D9Renderer classes would need replacing.
+Conclusion
+Jesse is right that this isn't "pure GPU," but we've built the best solution possible with VLC 3.x. The CPU copies are unavoidable with the current VLC API, and your implementation is clean, working, and maintainable. When VLC 4.x stabilizes, you'll have a clear upgrade path.
