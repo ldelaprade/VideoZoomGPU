@@ -153,3 +153,71 @@ Keep the same D3DImage WPF integration
 The architecture you've built is actually quite future-proof - only the VlcRenderer and D3D9Renderer classes would need replacing.
 Conclusion
 Jesse is right that this isn't "pure GPU," but we've built the best solution possible with VLC 3.x. The CPU copies are unavoidable with the current VLC API, and your implementation is clean, working, and maintainable. When VLC 4.x stabilizes, you'll have a clear upgrade path.
+
+
+Another Proposed Architecture
+VLC-based C++ DLL (native):
+
+Uses D3D11 for rendering (leveraging VLC’s native capabilities or your own GPU pipeline).
+Internally creates two video windows (HWND):
+One for main (zoomed) view
+One for miniature/thumbnail view
+WPF Application (managed/.NET):
+
+Hosts those HWNDs inside UI containers, typically using WindowsFormsHost, HwndHost, or similar.
+Handles UI controls, overlays, configuration, user interaction, etc.
+Interop API (DLL exports):
+
+Set target HWND dimensions for both zones
+Provide file paths and playback control (play/stop/pause)
+Optionally expose zoom/focus controls via exported functions
+Is this Fully GPU?
+YES:
+
+Video rendering and zooming lives inside the native DLL, using D3D11 surfaces/textures, processed and composited by the GPU.
+VLC supports hardware decoding and D3D11 output (docs).
+No CPU RAM bitmap copies needed for display—native window directly displays the video surface.
+WPF Integration
+With the two HWND outputs (main & miniature), your WPF app acts as a host:
+Place the video zones anywhere on the UI via HwndHost controls (or WinForms interop).
+No observable difference to the end user from software-rendered controls.
+All video processing, zoom, and display remains 100% on GPU.
+Known Gotchas & Considerations
+Window composition:
+
+Native video windows are "overlays" on the WPF window—they’re not brushable or composable with WPF’s vector graphics.
+Transparency/overlays/content intermingling with WPF graphics is limited—you can't alpha-blend video with WPF elements directly, unless you code carefully (and even then, still not same as direct composition).
+Z-order & Focus:
+
+Native HWNDs can overlay WPF content, so UI layering and interaction must be managed.
+You may need to handle focus, click, and keyboard routing manually.
+Resize/events:
+
+Inform the DLL about size/position changes when your WPF layout changes.
+Deployment:
+
+Requires native DLL distribution, plus dependencies (VLC binaries, D3D11 dependencies).
+Sample Flow
+Your WPF application creates two container controls using HwndHost.
+On initialization, it calls your DLL's exported function to create two child windows (HWND).
+Each HWND is attached to the WPF visual tree as a child of its associated HwndHost.
+You adjust their sizes via export functions.
+You control playback/filepath via export functions.
+All rendering happens natively, using D3D11.
+No RAM/bitmap copy; no WriteableBitmap involved; no D3DImage hack needed.
+References & Examples
+VLC D3D11 video output:
+VLC already supports D3D11 and D3D9 hardware presentation (sample).
+WPF hosting native HWND:
+Microsoft Docs: HwndHost
+Code sample for hosting native windows in WPF
+Conclusion
+Your architecture will:
+
+Provide efficient, hardware-accelerated playback and zoom.
+Completely avoid CPU-copy or bitmap software paths.
+Enable separation of UI control logic (WPF) and video rendering (native D3D11).
+Potential limitation: No direct WPF-composite visual effects over those videos (e.g., alpha-blend, visual brush), but sizing, placement, and control are all straightforward.
+
+
+
