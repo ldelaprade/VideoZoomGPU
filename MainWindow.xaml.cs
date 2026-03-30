@@ -471,6 +471,7 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        _vlc.Stop();
         base.OnClosed(e);
         CompositionTarget.Rendering -= OnRendering;
         _vlc.Dispose();
