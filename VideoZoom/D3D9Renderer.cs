@@ -11,38 +11,52 @@ namespace VideoZoom
     {
         private readonly Direct3DEx _d3dContext;
         private readonly DeviceEx _d3dDevice;
+        private PresentParameters _presentParams;
         private Texture _renderTexture;
         private Surface _renderSurface;
-        private Surface _systemSurface;  // Lockable surface in system memory
+        private Surface _systemSurface;
         private bool _isDisposed = false;
         private int _updateCount = 0;
 
         public int TextureWidth { get; private set; }
         public int TextureHeight { get; private set; }
 
-        public D3D9Renderer(int width, int height)
+        public D3D9Renderer(IntPtr hwnd, int width, int height)
         {
             TextureWidth = width;
             TextureHeight = height;
 
-            var presentParams = new PresentParameters
+            _presentParams = new PresentParameters
             {
                 Windowed = true,
                 SwapEffect = SwapEffect.Discard,
-                DeviceWindowHandle = GetDesktopWindow(),
+                DeviceWindowHandle = hwnd,
                 PresentationInterval = PresentInterval.Default,
             };
 
             _d3dContext = new Direct3DEx();
-            _d3dDevice = new DeviceEx(
-                _d3dContext,
-                0,
-                DeviceType.Hardware,
-                IntPtr.Zero,
-                CreateFlags.HardwareVertexProcessing | CreateFlags.Multithreaded | CreateFlags.FpuPreserve,
-                presentParams);
 
-            // Create a render target texture that D3DImage can use
+            var flags = CreateFlags.Multithreaded | CreateFlags.FpuPreserve | CreateFlags.HardwareVertexProcessing;
+            try
+            {
+                _d3dDevice = new DeviceEx(_d3dContext, 0, DeviceType.Hardware, hwnd, flags, _presentParams);
+            }
+            catch
+            {
+                flags = CreateFlags.Multithreaded | CreateFlags.FpuPreserve | CreateFlags.SoftwareVertexProcessing;
+                _d3dDevice = new DeviceEx(_d3dContext, 0, DeviceType.Hardware, hwnd, flags, _presentParams);
+            }
+
+            CreateResources();
+
+            System.Diagnostics.Debug.WriteLine($"D3D9Renderer created: {width}x{height}");
+        }
+
+        // Recreate textures/surfaces after ResetEx or device lost
+        private void CreateResources()
+        {
+            DisposeResourcesOnly();
+
             _renderTexture = new Texture(
                 _d3dDevice,
                 TextureWidth,
@@ -54,15 +68,33 @@ namespace VideoZoom
 
             _renderSurface = _renderTexture.GetSurfaceLevel(0);
 
-            // Create a lockable system memory surface for uploading texture data
             _systemSurface = Surface.CreateOffscreenPlain(
                 _d3dDevice,
                 TextureWidth,
                 TextureHeight,
                 Format.X8R8G8B8,
                 Pool.SystemMemory);
+        }
 
-            System.Diagnostics.Debug.WriteLine($"D3D9Renderer created: {width}x{height}");
+        public void SetWindowHandle(IntPtr hwnd)
+        {
+            if (_isDisposed) return;
+            try
+            {
+                if (_presentParams.DeviceWindowHandle == hwnd) return;
+                _presentParams.DeviceWindowHandle = hwnd;
+                _d3dDevice.ResetEx(ref _presentParams, null);
+                CreateResources(); // IMPORTANT: recreate surfaces after ResetEx
+                System.Diagnostics.Debug.WriteLine("D3D9Renderer window handle updated and resources recreated.");
+            }
+            catch (SharpDXException ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"SetWindowHandle error: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"SetWindowHandle general error: {ex.Message}");
+            }
         }
 
         public void UpdateTexture(IntPtr dataPtr, int width, int height)
@@ -83,14 +115,12 @@ namespace VideoZoom
 
             try
             {
-                // Lock the SYSTEM MEMORY surface (this works!)
                 dataRect = _systemSurface.LockRectangle(LockFlags.None);
                 locked = true;
 
                 int dstPitch = dataRect.Pitch;
-                int srcPitch = width * 4; // 4 bytes per pixel (BGRA)
+                int srcPitch = width * 4;
 
-                // Copy line by line using unsafe pointer arithmetic
                 unsafe
                 {
                     byte* dst = (byte*)dataRect.DataPointer.ToPointer();
@@ -100,8 +130,6 @@ namespace VideoZoom
                     {
                         byte* dstRow = dst + (y * dstPitch);
                         byte* srcRow = src + (y * srcPitch);
-
-                        // Copy one row
                         Buffer.MemoryCopy(srcRow, dstRow, dstPitch, srcPitch);
                     }
                 }
@@ -109,7 +137,6 @@ namespace VideoZoom
                 _systemSurface.UnlockRectangle();
                 locked = false;
 
-                // Copy from system memory surface to render target surface
                 _d3dDevice.UpdateSurface(_systemSurface, _renderSurface);
 
                 _updateCount++;
@@ -130,11 +157,7 @@ namespace VideoZoom
             {
                 if (locked)
                 {
-                    try
-                    {
-                        _systemSurface.UnlockRectangle();
-                    }
-                    catch { }
+                    try { _systemSurface.UnlockRectangle(); } catch { }
                 }
             }
         }
@@ -142,33 +165,53 @@ namespace VideoZoom
         public void Render(D3DImage d3dImage)
         {
             if (_isDisposed || d3dImage == null || _renderSurface == null) return;
+            if (!d3dImage.IsFrontBufferAvailable) return;
 
             try
             {
                 d3dImage.Lock();
+                d3dImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, _renderSurface.NativePointer);
 
-                if (d3dImage.IsFrontBufferAvailable)
+                if (d3dImage.PixelWidth > 0 && d3dImage.PixelHeight > 0)
                 {
-                    d3dImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, _renderSurface.NativePointer);
-
-                    if (d3dImage.PixelWidth > 0 && d3dImage.PixelHeight > 0)
-                    {
-                        d3dImage.AddDirtyRect(new Int32Rect(0, 0, d3dImage.PixelWidth, d3dImage.PixelHeight));
-                    }
+                    d3dImage.AddDirtyRect(new Int32Rect(0, 0, d3dImage.PixelWidth, d3dImage.PixelHeight));
                 }
-
                 d3dImage.Unlock();
             }
-            catch (InvalidOperationException ex)
+            catch (SharpDXException ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Render error: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"Render SharpDX error: {ex.Message}");
+                try
+                {
+                    var result = _d3dDevice.TestCooperativeLevel();
+                    if (result == ResultCode.DeviceLost || result == ResultCode.DeviceNotReset)
+                    {
+                        System.Diagnostics.Debug.WriteLine("Device lost; recreating resources.");
+                        CreateResources();
+                    }
+                }
+                catch { }
                 try { d3dImage?.Unlock(); } catch { }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Render unexpected error: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"Render general error: {ex.Message}");
                 try { d3dImage?.Unlock(); } catch { }
             }
+        }
+
+        private void DisposeResourcesOnly()
+        {
+            try
+            {
+                _systemSurface?.Dispose();
+                _renderSurface?.Dispose();
+                _renderTexture?.Dispose();
+            }
+            catch { }
+            _systemSurface = null;
+            _renderSurface = null;
+            _renderTexture = null;
         }
 
         public void Dispose()
@@ -178,9 +221,7 @@ namespace VideoZoom
 
             try
             {
-                _systemSurface?.Dispose();
-                _renderSurface?.Dispose();
-                _renderTexture?.Dispose();
+                DisposeResourcesOnly();
                 _d3dDevice?.Dispose();
                 _d3dContext?.Dispose();
             }

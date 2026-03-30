@@ -31,7 +31,9 @@
                 <!-- We'll show a Cropped+Scaled view of the source WriteableBitmap -->
                 <Image x:Name="MainImage"
                        SnapsToDevicePixels="True"
-                       Stretch="Fill">
+                       Stretch="Uniform"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center">
                     <Image.Effect>
                         <local:CropEffect x:Name="CropEffect" />
                     </Image.Effect>
@@ -72,17 +74,37 @@
                         ValueChanged="SeekSlider_ValueChanged"/>
 
                 <!-- Buttons -->
-                <DockPanel Grid.Row="1" LastChildFill="True" Background="#222"  Margin="0,0,0,0">
-                    <StackPanel Orientation="Horizontal" Margin="8,0" VerticalAlignment="Center">
-                        <Button Content="Open" Click="Open_Click" Margin="0,4,8,4"/>
-                        <Button Content="Play" Click="Play_Click" Margin="0,4,8,4"/>
-                        <Button Content="Pause" Click="Pause_Click" Margin="0,4,8,4"/>
-                        <Button Content="Stop" Click="Stop_Click" Margin="0,4,8,4"/>
-                        <Separator Width="16"/>
-                        <TextBlock Foreground="Yellow" VerticalAlignment="Center" Text="{Binding ZoomText}"/>
-                        <Separator Width="16"/>
-                        <TextBlock Foreground="White" VerticalAlignment="Center" Text="{Binding CurrentOpenedFilePath}"/>
-                    </StackPanel>
+                <DockPanel Grid.Row="1" LastChildFill="True" Background="#222" Margin="0,0,0,0">
+                    <Grid Margin="8,0" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>  <!-- Open -->
+                            <ColumnDefinition Width="Auto"/>  <!-- Play -->
+                            <ColumnDefinition Width="Auto"/>  <!-- Pause -->
+                            <ColumnDefinition Width="Auto"/>  <!-- Stop -->
+                            <ColumnDefinition Width="Auto"/>  <!-- Zoom text -->
+                            <ColumnDefinition Width="Auto"/>  <!-- File path -->
+                            <ColumnDefinition Width="*"/>     <!-- spacer -->
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>  <!-- Right-stuck checkbox -->
+                        </Grid.ColumnDefinitions>
+
+                        <Button Grid.Column="0" Content="Open" Click="Open_Click" Margin="0,4,8,4"/>
+                        <Button Grid.Column="1" Content="Play" Click="Play_Click" Margin="0,4,8,4"/>
+                        <Button Grid.Column="2" Content="Pause" Click="Pause_Click" Margin="0,4,8,4"/>
+                        <Button Grid.Column="3" Content="Stop" Click="Stop_Click" Margin="0,4,8,4"/>
+                        <TextBlock Grid.Column="4" Foreground="Yellow" VerticalAlignment="Center" Text="{Binding ZoomText}" Margin="16,0,0,0"/>
+                        <TextBlock Grid.Column="5" Foreground="White" VerticalAlignment="Center" Text="{Binding CurrentOpenedFilePath}" Margin="16,0,0,0"/>
+                        <!-- Column 6 is spacer -->
+                        <TextBlock Grid.Column="7" Foreground="White" VerticalAlignment="Center" Text="No Image? Try force no GPU: " Margin="0,0,0,0"/>
+                        <CheckBox Grid.Column="8"
+                                  x:Name="NoGpuCheckBox"
+                                  Content=""
+                                  Margin="0,4,8,4"
+                                  Foreground="White"
+                                  VerticalAlignment="Center"
+                                  Checked="NoGpu_Checked" 
+                                  Unchecked="NoGpu_Unchecked"/>
+                    </Grid>
                 </DockPanel>
             </Grid>
 
@@ -98,8 +120,14 @@
             <Grid>
                 <Image x:Name="MiniImage"
                        SnapsToDevicePixels="True"
-                       Stretch="Uniform" />
-                <Canvas x:Name="MiniOverlay" IsHitTestVisible="False">
+                       Stretch="Uniform"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center" />
+                <Canvas x:Name="MiniOverlay"
+                        Background="#01FFFFFF"
+                        MouseDown="MiniOverlay_MouseDown"
+                        MouseMove="MiniOverlay_MouseMove"
+                        MouseUp="MiniOverlay_MouseUp">
                     <!-- yellow rect drawn via code-behind or data binding -->
                     <Rectangle x:Name="MiniViewRect"
                                Stroke="Yellow" StrokeThickness="2"

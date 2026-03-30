@@ -1,4 +1,5 @@
-﻿using System.IO;
+﻿using System;
+using System.IO;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
@@ -17,11 +18,17 @@ public partial class MainWindow : Window
     private readonly ZoomState _zoom = new();
     private readonly VlcRenderer _vlc = new();
 
+    private bool _noGpu = false;
     private bool _isPanning = false;
+    private bool _isMiniDragging = false;
     private Point _lastMouse;
+    private double _miniDragOffsetX;
+    private double _miniDragOffsetY;
 
     private D3DImage _mainD3DImage;
     private D3DImage _miniD3DImage;
+
+    private WriteableBitmap _fallbackBitmap;
 
     public MainWindow()
     {
@@ -30,11 +37,150 @@ public partial class MainWindow : Window
 
         _mainD3DImage = new D3DImage();
         _miniD3DImage = new D3DImage();
+        _mainD3DImage.IsFrontBufferAvailableChanged += OnFrontBufferAvailableChanged;
+        _miniD3DImage.IsFrontBufferAvailableChanged += OnFrontBufferAvailableChanged;
+
         MainImage.Source = _mainD3DImage;
         MiniImage.Source = _miniD3DImage;
 
         PreviewMouseWheel += OnPreviewMouseWheel;
         CompositionTarget.Rendering += OnRendering;
+    }
+
+    private void OnFrontBufferAvailableChanged(object? sender, DependencyPropertyChangedEventArgs e)
+    {
+        var img = sender as D3DImage; if (img == null) return;
+        // Respect No GPU flag: always use CPU fallback
+        if (_noGpu)
+        {
+            EnsureFallbackBitmap();
+            if (MainImage.Source != _fallbackBitmap) MainImage.Source = _fallbackBitmap;
+            if (MiniImage.Source != _fallbackBitmap) MiniImage.Source = _fallbackBitmap;
+            return;
+        }
+
+        if (img.IsFrontBufferAvailable && _vlc.D3DRenderer != null)
+        {
+            try { _vlc.D3DRenderer.Render(img); } catch { }
+            if (MainImage.Source != _mainD3DImage) MainImage.Source = _mainD3DImage;
+            if (MiniImage.Source != _miniD3DImage) MiniImage.Source = _miniD3DImage;
+        }
+        else
+        {
+            EnsureFallbackBitmap();
+            if (MainImage.Source != _fallbackBitmap) MainImage.Source = _fallbackBitmap;
+            if (MiniImage.Source != _fallbackBitmap) MiniImage.Source = _fallbackBitmap;
+        }
+    }
+
+    private void MiniOverlay_MouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Left || _vlc.VideoW <= 0 || _vlc.VideoH <= 0)
+            return;
+
+        var mouse = e.GetPosition(MiniOverlay);
+        if (!TryMapMiniControlToSource(mouse, out double srcX, out double srcY))
+            return;
+
+        var crop = _zoom.GetCropRect();
+        bool isInsideViewRect = srcX >= crop.X && srcX <= crop.X + crop.Width &&
+                                srcY >= crop.Y && srcY <= crop.Y + crop.Height;
+        if (!isInsideViewRect)
+            return;
+
+        _isMiniDragging = true;
+        _miniDragOffsetX = srcX - crop.X;
+        _miniDragOffsetY = srcY - crop.Y;
+        MiniOverlay.CaptureMouse();
+        MiniOverlay.Cursor = Cursors.SizeAll;
+        e.Handled = true;
+    }
+
+    private void MiniOverlay_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_isMiniDragging || _vlc.VideoW <= 0 || _vlc.VideoH <= 0)
+            return;
+
+        var mouse = e.GetPosition(MiniOverlay);
+        if (!TryMapMiniControlToSource(mouse, out double srcX, out double srcY))
+            return;
+
+        var crop = _zoom.GetCropRect();
+        double cropW = crop.Width;
+        double cropH = crop.Height;
+
+        double newCropX = srcX - _miniDragOffsetX;
+        double newCropY = srcY - _miniDragOffsetY;
+
+        double minCenterX = cropW / 2.0;
+        double maxCenterX = _vlc.VideoW - cropW / 2.0;
+        double minCenterY = cropH / 2.0;
+        double maxCenterY = _vlc.VideoH - cropH / 2.0;
+
+        _zoom.CenterX = Math.Clamp(newCropX + cropW / 2.0, minCenterX, maxCenterX);
+        _zoom.CenterY = Math.Clamp(newCropY + cropH / 2.0, minCenterY, maxCenterY);
+        e.Handled = true;
+    }
+
+    private void MiniOverlay_MouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Left)
+            return;
+
+        _isMiniDragging = false;
+        MiniOverlay.ReleaseMouseCapture();
+        MiniOverlay.ClearValue(CursorProperty);
+        e.Handled = true;
+    }
+
+    private void EnsureFallbackBitmap()
+    {
+        if (_vlc.VideoW > 0 && _vlc.VideoH > 0)
+        {
+            if (_fallbackBitmap == null ||
+                _fallbackBitmap.PixelWidth != _vlc.VideoW ||
+                _fallbackBitmap.PixelHeight != _vlc.VideoH)
+            {
+                _fallbackBitmap = new WriteableBitmap(_vlc.VideoW, _vlc.VideoH, 96, 96, PixelFormats.Bgra32, null);
+            }
+        }
+    }
+
+    unsafe void CopyToFallback()
+    {
+        EnsureFallbackBitmap();
+        if (_fallbackBitmap == null) return;
+
+        _fallbackBitmap.Lock();
+        try
+        {
+            IntPtr dst = _fallbackBitmap.BackBuffer;
+            int dstStride = _fallbackBitmap.BackBufferStride;
+
+            int maxRows = _fallbackBitmap.PixelHeight;
+            int maxBytesPerRow = Math.Min(Math.Abs(dstStride), _fallbackBitmap.PixelWidth * 4);
+
+            if (!_vlc.CopyLatestBgraFrameTo(
+                    dst,
+                    dstStride,
+                    maxRows,
+                    maxBytesPerRow,
+                    out int copiedRows,
+                    out int copiedBytesPerRow))
+            {
+                return;
+            }
+
+            if (copiedRows <= 0 || copiedBytesPerRow <= 0)
+                return;
+
+            int dirtyWidth = Math.Min(_fallbackBitmap.PixelWidth, copiedBytesPerRow / 4);
+            _fallbackBitmap.AddDirtyRect(new Int32Rect(0, 0, dirtyWidth, copiedRows));
+        }
+        finally
+        {
+            _fallbackBitmap.Unlock();
+        }
     }
 
     private void OnPreviewMouseWheel(object sender, MouseWheelEventArgs e)
@@ -52,47 +198,50 @@ public partial class MainWindow : Window
 
     private void OnRendering(object? sender, EventArgs e)
     {
-        // Early exit if video not loaded yet
-        if (_vlc.VideoW == 0 || _vlc.VideoH == 0) return;
-
-        // D3DRenderer is created by VLC's VideoFormat callback
-        var renderer = _vlc.D3DRenderer;
-        if (renderer == null) return;
-
+        if (_vlc.VideoW == 0 || _vlc.VideoH == 0) 
+            return; 
+        
+        var renderer = _vlc.D3DRenderer; 
+        
+        if (renderer == null && !_noGpu) 
+            return;
+        
         try
         {
-            // Initialize zoom extents once
             if (_zoom.VideoW == 0)
             {
                 _zoom.VideoW = _vlc.VideoW;
                 _zoom.VideoH = _vlc.VideoH;
                 _zoom.CenterX = _zoom.VideoW / 2.0;
                 _zoom.CenterY = _zoom.VideoH / 2.0;
-
-                System.Diagnostics.Debug.WriteLine($"Video initialized: {_vlc.VideoW}x{_vlc.VideoH}");
             }
 
-            // Render the DirectX surface to our D3DImage controls
-            renderer.Render(_mainD3DImage);
-            renderer.Render(_miniD3DImage);
+            // Force CPU path when No GPU is enabled
+            if (!_noGpu && _mainD3DImage.IsFrontBufferAvailable)
+            {
+                renderer.Render(_mainD3DImage);
+                renderer.Render(_miniD3DImage);
+            }
+            else
+            {
+                CopyToFallback();
 
-            // Compute crop rectangle for zoom
+                // Ensure both images display the CPU bitmap
+                if (MainImage.Source != _fallbackBitmap) MainImage.Source = _fallbackBitmap;
+                if (MiniImage.Source != _fallbackBitmap) MiniImage.Source = _fallbackBitmap;
+            }
+
             var rect = _zoom.GetCropRect();
             if (rect.Width <= 0 || rect.Height <= 0) return;
 
-            // Update shader parameters
             var normalizedRect = new Rect(
                 (double)rect.X / _vlc.VideoW,
                 (double)rect.Y / _vlc.VideoH,
                 (double)rect.Width / _vlc.VideoW,
-                (double)rect.Height / _vlc.VideoH
-            );
+                (double)rect.Height / _vlc.VideoH);
             CropEffect.CropRectangle = normalizedRect;
 
-            // Update miniature overlay rectangle
             UpdateMiniOverlayRect(rect);
-
-            // Update seek slider
             UpdateSeekSlider();
         }
         catch (Exception ex)
@@ -191,6 +340,37 @@ public partial class MainWindow : Window
     private void Pause_Click(object sender, RoutedEventArgs e) => _vlc.Pause();
     private void Stop_Click(object sender, RoutedEventArgs e) => _vlc.Stop();
 
+    private void NoGpu_Checked(object sender, RoutedEventArgs e)
+    {
+        _noGpu = true;
+        // Force CPU sources for both images
+        EnsureFallbackBitmap();
+        MainImage.Source = _fallbackBitmap;
+        MiniImage.Source = _fallbackBitmap;
+    }
+    private void NoGpu_Unchecked(object sender, RoutedEventArgs e)
+    {
+        _noGpu = false;
+        // Switch back to D3D if available
+        if (_vlc.D3DRenderer != null)
+        {
+            try
+            {
+                if (_mainD3DImage.IsFrontBufferAvailable)
+                {
+                    _vlc.D3DRenderer.Render(_mainD3DImage);
+                    MainImage.Source = _mainD3DImage;
+                }
+                if (_miniD3DImage.IsFrontBufferAvailable)
+                {
+                    _vlc.D3DRenderer.Render(_miniD3DImage);
+                    MiniImage.Source = _miniD3DImage;
+                }
+            }
+            catch { /* keep UI responsive even if renderer throws */ }
+        }
+    }
+
     // -------------------- Mouse interactions ---------------------
 
     private void MainHitLayer_MouseWheel(object sender, MouseWheelEventArgs e)
@@ -264,10 +444,43 @@ public partial class MainWindow : Window
         return (sx, sy);
     }
 
+    private bool TryMapMiniControlToSource(Point p, out double srcX, out double srcY)
+    {
+        srcX = 0;
+        srcY = 0;
+
+        if (_vlc.VideoW <= 0 || _vlc.VideoH <= 0 || MiniImage.ActualWidth <= 0 || MiniImage.ActualHeight <= 0)
+            return false;
+
+        double scale = Math.Min(MiniImage.ActualWidth / _vlc.VideoW, MiniImage.ActualHeight / _vlc.VideoH);
+        if (scale <= 0)
+            return false;
+
+        double drawW = _vlc.VideoW * scale;
+        double drawH = _vlc.VideoH * scale;
+        double offsetX = (MiniImage.ActualWidth - drawW) / 2.0;
+        double offsetY = (MiniImage.ActualHeight - drawH) / 2.0;
+
+        double px = Math.Clamp(p.X, offsetX, offsetX + drawW);
+        double py = Math.Clamp(p.Y, offsetY, offsetY + drawH);
+
+        srcX = (px - offsetX) / scale;
+        srcY = (py - offsetY) / scale;
+        return true;
+    }
+
     protected override void OnClosed(EventArgs e)
     {
         base.OnClosed(e);
         CompositionTarget.Rendering -= OnRendering;
         _vlc.Dispose();
+    }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+
+        var hwnd = new WindowInteropHelper(this).Handle;
+        _vlc.InitializeWithHwnd(hwnd); // Supply HWND before video format negotiation
     }
 }
